@@ -67,6 +67,8 @@ func messageHandler(_ mqtt.Client, msg mqtt.Message) {
 
 		mu.Lock()
 		for _, d := range list {
+
+			// we only care about sockets.
 			if !strings.HasPrefix(d.FriendlyName, "socket-") {
 				continue
 			}
@@ -88,6 +90,8 @@ func messageHandler(_ mqtt.Client, msg mqtt.Message) {
 			time.Sleep(time.Second)
 
 			for _, d := range list {
+
+				// we only care about sockets.
 				if !strings.HasPrefix(d.FriendlyName, "socket-") {
 					continue
 				}
@@ -110,7 +114,7 @@ func messageHandler(_ mqtt.Client, msg mqtt.Message) {
 
 	name := strings.TrimPrefix(topic, prefix)
 
-	// Only accept socket devices.
+	// we only care about sockets.
 	if !strings.HasPrefix(name, "socket-") {
 		return
 	}
@@ -304,7 +308,7 @@ var pageTemplate = template.Must(template.New("index").Parse(`
 </style>
 </head>
 <body>
-<h1>Zigbee Devices</h1>
+<h1>Zigbee Switches</h1>
 
 <div class="grid">
 {{range .}}
@@ -324,6 +328,9 @@ var pageTemplate = template.Must(template.New("index").Parse(`
 	<p>No Zigbee devices found.</p>
 {{end}}
 </div>
+
+<h1>Zigbee Lights</h1>
+<p>Soon</p>
 </body>
 </html>
 `))
