@@ -89,7 +89,8 @@ func messageHandler(_ mqtt.Client, msg mqtt.Message) {
 			time.Sleep(time.Second)
 
 			for _, d := range list {
-				if d.FriendlyName == "" || d.Type == "Coordinator" {
+				if d.FriendlyName == "" || d.Type == "Coordinator" || !strings.Contains(d.FriendlyName, "socket-") {
+
 					continue
 				}
 
