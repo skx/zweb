@@ -11,6 +11,7 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"os"
 	"sort"
 	"strings"
 	"sync"
@@ -60,13 +61,13 @@ func messageHandler(_ mqtt.Client, msg mqtt.Message) {
 		var list []ZigbeeDevice
 
 		if err := json.Unmarshal(payload, &list); err != nil {
-			log.Printf("Invalid device list: %v", err)
+			// log.Printf("Invalid device list: %v", err)
 			return
 		}
 
 		mu.Lock()
 		for _, d := range list {
-			if d.FriendlyName == "" || d.Type == "Coordinator" || !strings.Contains(d.FriendlyName, "socket-") {
+			if !strings.HasPrefix(d.FriendlyName, "socket-") {
 				continue
 			}
 
@@ -81,16 +82,13 @@ func messageHandler(_ mqtt.Client, msg mqtt.Message) {
 		}
 		mu.Unlock()
 
-		log.Printf("Discovered %d Zigbee devices", len(list))
-
 		// Give Zigbee2MQTT a moment to finish discovery,
 		// then request the current state of each device.
 		go func() {
 			time.Sleep(time.Second)
 
 			for _, d := range list {
-				if d.FriendlyName == "" || d.Type == "Coordinator" || !strings.Contains(d.FriendlyName, "socket-") {
-
+				if !strings.HasPrefix(d.FriendlyName, "socket-") {
 					continue
 				}
 
@@ -111,6 +109,11 @@ func messageHandler(_ mqtt.Client, msg mqtt.Message) {
 	}
 
 	name := strings.TrimPrefix(topic, prefix)
+
+	// Only accept socket devices.
+	if !strings.HasPrefix(name, "socket-") {
+		return
+	}
 
 	// Ignore subtopics such as device/set.
 	if name == "" || strings.Contains(name, "/") {
@@ -137,7 +140,7 @@ func messageHandler(_ mqtt.Client, msg mqtt.Message) {
 	devices[name] = d
 	mu.Unlock()
 
-	log.Printf("%s = %s", name, state)
+	// log.Printf("%s = %s", name, state)
 }
 
 func getState(name string) string {
@@ -155,8 +158,6 @@ func requestDeviceState(name string) {
 
 	if token.WaitTimeout(5*time.Second) && token.Error() != nil {
 		log.Printf("State request failed for %s: %v", name, token.Error())
-	} else {
-		log.Printf("Requested state for %s", name)
 	}
 }
 
@@ -227,10 +228,10 @@ func toggleDevice(name string) error {
 		case <-retry.C:
 			// Retransmit if the state hasn't changed.
 			if getState(name) != target {
-				log.Printf("Retrying command for %s", name)
+				// log.Printf("Retrying command for %s", name)
 
 				if err := publishState(name, target); err != nil {
-					log.Printf("Publish error: %v", err)
+					// log.Printf("Publish error: %v", err)
 				}
 			}
 
@@ -378,6 +379,7 @@ func indexHandler(w http.ResponseWriter, r *http.Request) {
 
 	if err := pageTemplate.Execute(w, list); err != nil {
 		log.Printf("Template error: %v", err)
+		os.Exit(1)
 	}
 }
 
@@ -417,22 +419,18 @@ func main() {
 	opts.SetConnectRetry(true)
 
 	opts.SetOnConnectHandler(func(c mqtt.Client) {
-		log.Println("MQTT connected")
-
 		token := c.Subscribe(mqttPrefix+"/#", 1, messageHandler)
 		if token.Wait() && token.Error() != nil {
 			log.Printf("MQTT subscription error: %v", token.Error())
+			os.Exit(1)
 		}
-	})
-
-	opts.SetConnectionLostHandler(func(_ mqtt.Client, err error) {
-		log.Printf("MQTT connection lost: %v", err)
 	})
 
 	mqttClient = mqtt.NewClient(opts)
 
 	if token := mqttClient.Connect(); token.Wait() && token.Error() != nil {
 		log.Fatalf("MQTT connection failed: %v", token.Error())
+		os.Exit(1)
 	}
 
 	log.Printf("Connected to MQTT broker at %s", mqttBroker)
@@ -444,6 +442,6 @@ func main() {
 	log.Printf("HTTP server listening on %s", httpAddress)
 
 	if err := http.ListenAndServe(httpAddress, nil); err != nil {
-		log.Fatal(err)
+		// log.Fatal(err)
 	}
 }
