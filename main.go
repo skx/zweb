@@ -6,12 +6,14 @@ package main
 
 import (
 	"encoding/json"
+	"flag"
 	"fmt"
 	"html/template"
 	"log"
 	"net/http"
 	"net/url"
 	"os"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -20,11 +22,12 @@ import (
 	mqtt "github.com/eclipse/paho.mqtt.golang"
 )
 
-const (
-	mqttBroker  = "tcp://cube.local:1883"
-	mqttPrefix  = "zigbee2mqtt"
-	httpAddress = ":8000"
+var filterRe *regexp.Regexp
 
+const (
+	mqttBroker     = "tcp://cube.local:1883"
+	mqttPrefix     = "zigbee2mqtt"
+	httpAddress    = ":8000"
 	commandTimeout = 20 * time.Second
 	retryInterval  = 2 * time.Second
 )
@@ -68,8 +71,8 @@ func messageHandler(_ mqtt.Client, msg mqtt.Message) {
 		mu.Lock()
 		for _, d := range list {
 
-			// we only care about sockets.
-			if !strings.HasPrefix(d.FriendlyName, "socket-") {
+			// Ignore things that don't match our filter, if set.
+			if filterRe != nil && !filterRe.MatchString(d.FriendlyName) {
 				continue
 			}
 
@@ -91,8 +94,8 @@ func messageHandler(_ mqtt.Client, msg mqtt.Message) {
 
 			for _, d := range list {
 
-				// we only care about sockets.
-				if !strings.HasPrefix(d.FriendlyName, "socket-") {
+				// Ignore things that don't match our filter, if set.
+				if filterRe != nil && !filterRe.MatchString(d.FriendlyName) {
 					continue
 				}
 
@@ -114,8 +117,8 @@ func messageHandler(_ mqtt.Client, msg mqtt.Message) {
 
 	name := strings.TrimPrefix(topic, prefix)
 
-	// we only care about sockets.
-	if !strings.HasPrefix(name, "socket-") {
+	// Ignore things that don't match our filter, if set.
+	if filterRe != nil && !filterRe.MatchString(name) {
 		return
 	}
 
@@ -417,6 +420,20 @@ func toggleHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func main() {
+
+	// Command line flags
+	filter := flag.String("filter", "", "Only handle devices matching this regexp")
+	flag.Parse()
+
+	if *filter != "" {
+		var err error
+		filterRe, err = regexp.Compile(*filter)
+		if err != nil {
+			fmt.Printf("failed to compile regexp %s: %s\n", *filter, err.Error())
+			return
+		}
+	}
+
 	// MQTT configuration.
 	opts := mqtt.NewClientOptions()
 	opts.AddBroker(mqttBroker)
