@@ -1,0 +1,22 @@
+
+[Unit]
+Description=Zigbee MQTT Web Control
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/zweb -filter=^socket-
+Restart=always
+RestartSec=5
+
+# Run as an unprivileged user
+User=nobody
+Group=nogroup
+
+# Ensure clean shutdown
+KillSignal=SIGINT
+TimeoutStopSec=10
+
+[Install]
+WantedBy=multi-user.target
