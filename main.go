@@ -19,11 +19,6 @@ import (
 	mq "github.com/skx/zweb/mq"
 )
 
-const (
-	mqttBroker  = "tcp://cube.my.flat:1883"
-	httpAddress = ":8000"
-)
-
 var (
 	filterRe *regexp.Regexp
 	client   *mq.Client
@@ -255,11 +250,10 @@ func toggleHandler(w http.ResponseWriter, r *http.Request) {
 
 func main() {
 	// Command-line flags.
-	filter := flag.String(
-		"filter",
-		"",
-		"Only display devices matching this regexp",
-	)
+	filter := flag.String("filter", "", "Only display devices matching this regexp")
+	mq_host := flag.String("mq-host", "cube.my.flat", "The MQ host address")
+	mq_port := flag.Int("mq-port", 1883, "The MQ host port.")
+	http_port := flag.String("http-port", ":8000", "The port to listen upon")
 	flag.Parse()
 
 	if *filter != "" {
@@ -273,8 +267,11 @@ func main() {
 	// Connect to MQTT through the shared client package.
 	var err error
 
+	// Where we connect
+	mqUri := fmt.Sprintf("tcp://%s:%d/", *mq_host, *mq_port)
+
 	client, err = mq.Connect(mq.Config{
-		Broker:   mqttBroker,
+		Broker:   mqUri,
 		ClientID: "zigbee-webserver",
 	})
 	if err != nil {
@@ -282,7 +279,7 @@ func main() {
 	}
 	defer client.Close()
 
-	log.Printf("Connected to MQTT broker at %s", mqttBroker)
+	log.Printf("Connected to MQTT broker at %s", mqUri)
 
 	// Log discovered devices.
 	for _, d := range client.Devices() {
@@ -302,9 +299,9 @@ func main() {
 	http.HandleFunc("/", indexHandler)
 	http.HandleFunc("/toggle/{name}", toggleHandler)
 
-	log.Printf("HTTP server listening on %s", httpAddress)
+	log.Printf("HTTP server listening on %s", *http_port)
 
-	if err := http.ListenAndServe(httpAddress, nil); err != nil {
+	if err := http.ListenAndServe(*http_port, nil); err != nil {
 		log.Fatalf("HTTP server failed: %v", err)
 	}
 }

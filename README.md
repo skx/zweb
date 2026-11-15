@@ -12,7 +12,20 @@ Assuming you have a zigbee2mqtt deployment you already have a simple web-based f
 
 Instead this application presents just a list of all switches (matching an optional regular expression) which can be clicked to toggle their state, and otherwise updates to show "on" vs "off".
 
-When launched it connects to the MQ host on `cube.my.flat` set the environmental variable MQ_HOST to point to a different endpoint if you're not me.
+When launched it connects to the MQ host on `cube.my.flat` use the command-line flags to setup a different end-point:
+
+```
+$ ./zweb -h
+Usage of ./zweb:
+  -filter string
+        Only display devices matching this regexp
+  -http-port string
+        The port to listen upon (default ":8000")
+  -mq-host string
+        The MQ host address (default "cube.my.flat")
+  -mq-port int
+        The MQ host port. (default 1883)
+```
 
 
 
