@@ -1,251 +1,44 @@
-// Present a simple Web UI of all known switches,
+// Present a simple Web UI of all known Zigbee devices,
 // allowing easy toggle via a phone.
 //
 // Serves on :8000
 package main
 
 import (
-	"encoding/json"
 	"flag"
 	"fmt"
 	"html/template"
 	"log"
 	"net/http"
 	"net/url"
-	"os"
 	"regexp"
 	"sort"
 	"strings"
 	"sync"
-	"time"
 
-	mqtt "github.com/eclipse/paho.mqtt.golang"
+	mq "github.com/skx/zweb/mq"
 )
-
-var filterRe *regexp.Regexp
 
 const (
-	mqttBroker     = "tcp://cube.local:1883"
-	mqttPrefix     = "zigbee2mqtt"
-	httpAddress    = ":8000"
-	commandTimeout = 20 * time.Second
-	retryInterval  = 2 * time.Second
+	mqttBroker  = "tcp://cube.my.flat:1883"
+	httpAddress = ":8000"
 )
 
-type Device struct {
-	Name        string
-	Description string
-	State       string
-}
-
-type ZigbeeDevice struct {
-	FriendlyName string `json:"friendly_name"`
-	Description  string `json:"description"`
-	Type         string `json:"type"`
-}
-
 var (
-	mqttClient mqtt.Client
+	filterRe *regexp.Regexp
+	client   *mq.Client
 
-	mu      sync.RWMutex
-	devices = make(map[string]Device)
-
-	// Serialize toggles to avoid conflicting commands.
+	// Serialize toggles so two requests cannot toggle the same
+	// device at the same time.
 	toggleMu sync.Mutex
 )
 
-func messageHandler(_ mqtt.Client, msg mqtt.Message) {
-
-	topic := msg.Topic()
-	payload := msg.Payload()
-
-	// Device discovery.
-	if topic == mqttPrefix+"/bridge/devices" {
-		var list []ZigbeeDevice
-
-		if err := json.Unmarshal(payload, &list); err != nil {
-			// log.Printf("Invalid device list: %v", err)
-			return
-		}
-
-		mu.Lock()
-		for _, d := range list {
-
-			// Ignore things that don't match our filter, if set.
-			if filterRe != nil && !filterRe.MatchString(d.FriendlyName) {
-				continue
-			}
-
-			old := devices[d.FriendlyName]
-			old.Name = d.FriendlyName
-			old.Description = d.Description
-			old.Name = d.FriendlyName
-			if old.State == "" {
-				old.State = "UNKNOWN"
-			}
-			devices[d.FriendlyName] = old
-		}
-		mu.Unlock()
-
-		// Give Zigbee2MQTT a moment to finish discovery,
-		// then request the current state of each device.
-		go func() {
-			time.Sleep(time.Second)
-
-			for _, d := range list {
-
-				// Ignore things that don't match our filter, if set.
-				if filterRe != nil && !filterRe.MatchString(d.FriendlyName) {
-					continue
-				}
-
-				requestDeviceState(d.FriendlyName)
-
-				// Avoid flooding the Zigbee network.
-				time.Sleep(150 * time.Millisecond)
-			}
-		}()
-
-		return
-	}
-
-	// Device state updates.
-	prefix := mqttPrefix + "/"
-	if !strings.HasPrefix(topic, prefix) {
-		return
-	}
-
-	name := strings.TrimPrefix(topic, prefix)
-
-	// Ignore things that don't match our filter, if set.
-	if filterRe != nil && !filterRe.MatchString(name) {
-		return
-	}
-
-	// Ignore subtopics such as device/set.
-	if name == "" || strings.Contains(name, "/") {
-		return
-	}
-
-	var stateData struct {
-		State string `json:"state"`
-	}
-
-	if err := json.Unmarshal(payload, &stateData); err != nil {
-		return
-	}
-
-	state := strings.ToUpper(stateData.State)
-	if state != "ON" && state != "OFF" {
-		return
-	}
-
-	mu.Lock()
-	d := devices[name]
-	d.Name = name
-	d.State = state
-	devices[name] = d
-	mu.Unlock()
-
-	// log.Printf("%s = %s", name, state)
-}
-
-func getState(name string) string {
-	mu.RLock()
-	defer mu.RUnlock()
-
-	return devices[name].State
-}
-
-func requestDeviceState(name string) {
-	topic := mqttPrefix + "/" + name + "/get"
-	payload := `{"state":""}`
-
-	token := mqttClient.Publish(topic, 1, false, payload)
-
-	if token.WaitTimeout(5*time.Second) && token.Error() != nil {
-		log.Printf("State request failed for %s: %v", name, token.Error())
-	}
-}
-
-func publishState(name, state string) error {
-	payload := map[string]string{
-		"state": state,
-	}
-
-	data, err := json.Marshal(payload)
-	if err != nil {
-		return err
-	}
-
-	topic := mqttPrefix + "/" + name + "/set"
-
-	token := mqttClient.Publish(topic, 1, false, data)
-	if !token.WaitTimeout(5 * time.Second) {
-		return fmt.Errorf("MQTT publish timed out")
-	}
-
-	return token.Error()
-}
-
-// Toggle a device and wait until MQTT confirms the new state.
-// Commands are retransmitted periodically if necessary.
-func toggleDevice(name string) error {
-	toggleMu.Lock()
-	defer toggleMu.Unlock()
-
-	current := getState(name)
-
-	if current != "ON" && current != "OFF" {
-		return fmt.Errorf("unknown state for device %s %s", name, current)
-	}
-
-	target := "ON"
-	if current == "ON" {
-		target = "OFF"
-	}
-
-	log.Printf("Toggling %s: %s -> %s", name, current, target)
-
-	deadline := time.NewTimer(commandTimeout)
-	defer deadline.Stop()
-
-	retry := time.NewTicker(retryInterval)
-	defer retry.Stop()
-
-	// Publish immediately.
-	if err := publishState(name, target); err != nil {
-		return err
-	}
-
-	for {
-		// Check for confirmation.
-		if getState(name) == target {
-			log.Printf("%s successfully changed to %s", name, target)
-			return nil
-		}
-
-		select {
-		case <-deadline.C:
-			return fmt.Errorf(
-				"timeout waiting for %s to change to %s",
-				name, target,
-			)
-
-		case <-retry.C:
-			// Retransmit if the state hasn't changed.
-			if getState(name) != target {
-				// log.Printf("Retrying command for %s", name)
-
-				if err := publishState(name, target); err != nil {
-					// log.Printf("Publish error: %v", err)
-				}
-			}
-
-		case <-time.After(200 * time.Millisecond):
-			// Periodically check for state updates.
-		}
-	}
+type PageDevice struct {
+	Name        string
+	Description string
+	State       string
+	Escaped     string
+	Class       string
 }
 
 var pageTemplate = template.Must(template.New("index").Parse(`
@@ -316,11 +109,14 @@ var pageTemplate = template.Must(template.New("index").Parse(`
 <div class="grid">
 {{range .}}
 	<div class="device">
-	       <div class="name">{{.Description}}</div>
-	       <div style="font-size:12px;color:#999;margin-bottom:12px">{{.Name}}</div>
-	       <div class="state">{{.State}}</div>
+		<div class="name">{{.Description}}</div>
+		<div style="font-size:12px;color:#999;margin-bottom:12px">
+			{{.Name}}
+		</div>
+		<div class="state">{{.State}}</div>
 		<form method="POST" action="/toggle/{{.Escaped}}">
-			<button class="{{.Class}}" type="submit">
+			<button class="{{.Class}}" type="submit"
+				{{if not (or (eq .State "ON") (eq .State "OFF"))}}disabled{{end}}>
 				{{if eq .State "ON"}}Turn OFF
 				{{else if eq .State "OFF"}}Turn ON
 				{{else}}Unknown{{end}}
@@ -333,17 +129,46 @@ var pageTemplate = template.Must(template.New("index").Parse(`
 </div>
 
 <h1>Zigbee Lights</h1>
-<p>Soon</p>
+<p>Coming soon ..</p>
 </body>
 </html>
 `))
 
-type PageDevice struct {
-	Name        string
-	Description string
-	State       string
-	Escaped     string
-	Class       string
+// Return the devices to display, using the filter if one was supplied.
+func pageDevices() []PageDevice {
+	devices := client.Devices()
+
+	list := make([]PageDevice, 0, len(devices))
+
+	for _, d := range devices {
+		if filterRe != nil && !filterRe.MatchString(d.FriendlyName) {
+			continue
+		}
+
+		state := client.GetState(d.FriendlyName)
+
+		class := "unknown"
+		switch state {
+		case "ON":
+			class = "on"
+		case "OFF":
+			class = "off"
+		}
+
+		list = append(list, PageDevice{
+			Name:        d.FriendlyName,
+			Description: d.Description,
+			State:       state,
+			Escaped:     url.PathEscape(d.FriendlyName),
+			Class:       class,
+		})
+	}
+
+	sort.Slice(list, func(i, j int) bool {
+		return list[i].Name < list[j].Name
+	})
+
+	return list
 }
 
 func indexHandler(w http.ResponseWriter, r *http.Request) {
@@ -357,40 +182,39 @@ func indexHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	mu.RLock()
-
-	list := make([]PageDevice, 0, len(devices))
-
-	for _, d := range devices {
-		class := "unknown"
-
-		switch d.State {
-		case "ON":
-			class = "on"
-		case "OFF":
-			class = "off"
-		}
-
-		list = append(list, PageDevice{
-			Name:        d.Name,
-			Description: d.Description,
-			State:       d.State,
-			Escaped:     url.PathEscape(d.Name),
-			Class:       class,
-		})
-	}
-
-	sort.Slice(list, func(i, j int) bool {
-		return list[i].Name < list[j].Name
-	})
-	mu.RUnlock()
-
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 
-	if err := pageTemplate.Execute(w, list); err != nil {
+	if err := pageTemplate.Execute(w, pageDevices()); err != nil {
 		log.Printf("Template error: %v", err)
-		os.Exit(1)
 	}
+}
+
+// Toggle a device and wait for the MQTT client to confirm the new state.
+func toggleDevice(name string) error {
+	toggleMu.Lock()
+	defer toggleMu.Unlock()
+
+	current := client.GetState(name)
+
+	var target string
+
+	switch current {
+	case "ON":
+		target = "OFF"
+	case "OFF":
+		target = "ON"
+	default:
+		return fmt.Errorf("unknown state for device %s: %s", name, current)
+	}
+
+	log.Printf("Toggling %s: %s -> %s", name, current, target)
+
+	if err := client.SetState(name, target); err != nil {
+		return fmt.Errorf("failed to set %s to %s: %w", name, target, err)
+	}
+
+	log.Printf("%s successfully changed to %s", name, target)
+	return nil
 }
 
 func toggleHandler(w http.ResponseWriter, r *http.Request) {
@@ -399,13 +223,23 @@ func toggleHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	name, err := url.PathUnescape(r.PathValue("name"))
-	if err != nil || name == "" || strings.Contains(name, "/") {
+	name := r.PathValue("name")
+
+	if name == "" || strings.Contains(name, "/") {
 		http.Error(w, "Invalid device name", http.StatusBadRequest)
 		return
 	}
 
-	if getState(name) == "" {
+	// Check that the requested device exists and is allowed by the filter.
+	found := false
+	for _, d := range client.Devices() {
+		if d.FriendlyName == name {
+			found = true
+			break
+		}
+	}
+
+	if !found || (filterRe != nil && !filterRe.MatchString(name)) {
 		http.Error(w, "Unknown device", http.StatusNotFound)
 		return
 	}
@@ -420,44 +254,49 @@ func toggleHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func main() {
-
-	// Command line flags
-	filter := flag.String("filter", "", "Only handle devices matching this regexp")
+	// Command-line flags.
+	filter := flag.String(
+		"filter",
+		"",
+		"Only display devices matching this regexp",
+	)
 	flag.Parse()
 
 	if *filter != "" {
 		var err error
 		filterRe, err = regexp.Compile(*filter)
 		if err != nil {
-			fmt.Printf("failed to compile regexp %s: %s\n", *filter, err.Error())
-			return
+			log.Fatalf("Failed to compile regexp %q: %v", *filter, err)
 		}
 	}
 
-	// MQTT configuration.
-	opts := mqtt.NewClientOptions()
-	opts.AddBroker(mqttBroker)
-	opts.SetClientID("zigbee-webserver")
-	opts.SetCleanSession(true)
-	opts.SetAutoReconnect(true)
-	opts.SetConnectRetry(true)
+	// Connect to MQTT through the shared client package.
+	var err error
 
-	opts.SetOnConnectHandler(func(c mqtt.Client) {
-		token := c.Subscribe(mqttPrefix+"/#", 1, messageHandler)
-		if token.Wait() && token.Error() != nil {
-			log.Printf("MQTT subscription error: %v", token.Error())
-			os.Exit(1)
-		}
+	client, err = mq.Connect(mq.Config{
+		Broker:   mqttBroker,
+		ClientID: "zigbee-webserver",
 	})
-
-	mqttClient = mqtt.NewClient(opts)
-
-	if token := mqttClient.Connect(); token.Wait() && token.Error() != nil {
-		log.Fatalf("MQTT connection failed: %v", token.Error())
-		os.Exit(1)
+	if err != nil {
+		log.Fatalf("MQTT connection failed: %v", err)
 	}
+	defer client.Close()
 
 	log.Printf("Connected to MQTT broker at %s", mqttBroker)
+
+	// Log discovered devices.
+	for _, d := range client.Devices() {
+		if filterRe != nil && !filterRe.MatchString(d.FriendlyName) {
+			continue
+		}
+
+		log.Printf(
+			"Device: %-25s State: %-7s Description: %s",
+			d.FriendlyName,
+			client.GetState(d.FriendlyName),
+			d.Description,
+		)
+	}
 
 	// HTTP routes.
 	http.HandleFunc("/", indexHandler)
@@ -466,6 +305,6 @@ func main() {
 	log.Printf("HTTP server listening on %s", httpAddress)
 
 	if err := http.ListenAndServe(httpAddress, nil); err != nil {
-		// log.Fatal(err)
+		log.Fatalf("HTTP server failed: %v", err)
 	}
 }
