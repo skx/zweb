@@ -276,6 +276,7 @@ func main() {
 	})
 	if err != nil {
 		log.Fatalf("MQTT connection failed: %v", err)
+		return
 	}
 	defer client.Close()
 
