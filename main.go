@@ -16,12 +16,12 @@ import (
 	"strings"
 	"sync"
 
-	mq "github.com/skx/zweb/mq"
+	"github.com/skx/ziglib"
 )
 
 var (
 	filterRe *regexp.Regexp
-	client   *mq.Client
+	client   *ziglib.Client
 
 	// Serialize toggles so two requests cannot toggle the same
 	// device at the same time.
@@ -270,7 +270,7 @@ func main() {
 	// Where we connect
 	mqUri := fmt.Sprintf("tcp://%s:%d/", *mq_host, *mq_port)
 
-	client, err = mq.Connect(mq.Config{
+	client, err = ziglib.Connect(ziglib.Config{
 		Broker:   mqUri,
 		ClientID: "zigbee-webserver",
 	})
