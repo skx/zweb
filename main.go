@@ -253,6 +253,8 @@ func main() {
 	filter := flag.String("filter", "", "Only display devices matching this regexp")
 	mq_host := flag.String("mq-host", "cube.my.flat", "The MQ host address")
 	mq_port := flag.Int("mq-port", 1883, "The MQ host port.")
+	mq_user := flag.String("mq-user", "", "The username to authenticate to the queue with")
+	mq_pass := flag.String("mq-pass", "", "The password to authenticate to the queue with")
 	http_port := flag.String("http-port", ":8000", "The port to listen upon")
 	flag.Parse()
 
@@ -273,6 +275,8 @@ func main() {
 	client, err = ziglib.Connect(ziglib.Config{
 		Broker:   mqUri,
 		ClientID: "zigbee-webserver",
+		Username: *mq_user,
+		Password: *mq_pass,
 	})
 	if err != nil {
 		log.Fatalf("MQTT connection failed: %v", err)

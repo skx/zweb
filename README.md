@@ -2,30 +2,20 @@
 
 A trivial program to control zigbee devices, via direct contact with the zigbee2mqtt queue.
 
-We server a single-page view, over HTTP, of all zigbee devices which have a friendly name matching the specified regular expression.
+We serve a single-page UI over HTTP of all zigbee devices, optionally limiting the display to those which match a given regular expression.
 
 
 
-## Overview
+## Configuration
 
-Assuming you have a zigbee2mqtt deployment you already have a simple web-based front-end, but it is complex and hard to control over a table or mobile phone.
+By default we connect to the MQ instance on `cube.my.flat` but command-line switches can configure the endpoint-details:
 
-Instead this application presents just a list of all switches (matching an optional regular expression) which can be clicked to toggle their state, and otherwise updates to show "on" vs "off".
-
-When launched it connects to the MQ host on `cube.my.flat` use the command-line flags to setup a different end-point:
-
-```
-$ ./zweb -h
-Usage of ./zweb:
-  -filter string
-        Only display devices matching this regexp
-  -http-port string
-        The port to listen upon (default ":8000")
-  -mq-host string
-        The MQ host address (default "cube.my.flat")
-  -mq-port int
-        The MQ host port. (default 1883)
-```
+| Flag       |                                    Purpose |
+| ---------- | ------------------------------------------ |
+| `-mq-host` | Specify the hostname or IP of the queue.   |
+| `-mq-user` | Specify the username to connect with.      |
+| `-mq-pass` | Specify the password to connect with.      |
+| `-mq-port` | Specify the port-number to contact.        |
 
 
 
@@ -36,7 +26,7 @@ Nothing complex:
     go build .
     ./zweb -filter="^socket-"
 
-Then open http://127.0.0.1:8000/ in your device.
+Then open http://127.0.0.1:8000/ in your browser, phone, or tablet.
 
 
 
