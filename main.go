@@ -1,32 +1,58 @@
-// Present a simple Web UI of all known Zigbee devices,
-// allowing easy toggle via a phone.
-//
-// Serves on :8000
 package main
 
 import (
+	"embed"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"html/template"
 	"log"
 	"net/http"
 	"net/url"
+	"os"
 	"regexp"
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/skx/ziglib"
 )
 
+//go:embed index.tmpl
+var templateFS embed.FS
+
+var pageTemplate = template.Must(
+	template.ParseFS(templateFS, "index.tmpl"),
+)
+
 var (
-	filterRe *regexp.Regexp
-	client   *ziglib.Client
+	client *ziglib.Client
+	groups []DeviceGroup
 
 	// Serialize toggles so two requests cannot toggle the same
 	// device at the same time.
 	toggleMu sync.Mutex
 )
+
+// Configuration structures.
+
+type Config struct {
+	Groups []GroupConfig `json:"groups"`
+}
+
+type GroupConfig struct {
+	Name    string `json:"name"`
+	Pattern string `json:"pattern"`
+}
+
+// DeviceGroup contains a configured group and its compiled regexp.
+type DeviceGroup struct {
+	Name    string
+	Pattern *regexp.Regexp
+}
+
+// Template structures.
 
 type PageDevice struct {
 	Name        string
@@ -36,136 +62,123 @@ type PageDevice struct {
 	Class       string
 }
 
-var pageTemplate = template.Must(template.New("index").Parse(`
-<!DOCTYPE html>
-<html>
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<meta http-equiv="refresh" content="30">
-<title>Zigbee Devices</title>
-<style>
-	body {
-		font-family: sans-serif;
-		background: #181818;
-		color: #eee;
-		margin: 30px;
-	}
-	h1 {
-		margin-bottom: 25px;
-	}
-	.grid {
-		display: grid;
-		grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
-		gap: 15px;
-	}
-	.device {
-		background: #292929;
-		border-radius: 12px;
-		padding: 20px;
-		text-align: center;
-	}
-	.name {
-		font-size: 17px;
-		margin-bottom: 15px;
-		overflow-wrap: anywhere;
-	}
-	.state {
-		font-size: 14px;
-		margin-bottom: 15px;
-	}
-	button {
-		border: 0;
-		border-radius: 8px;
-		padding: 12px 25px;
-		font-size: 16px;
-		cursor: pointer;
-		width: 100%;
-		color: white;
-		background: #555;
-	}
-	button.on {
-		background: #218838;
-	}
-	button.off {
-		background: #b52b37;
-	}
-	button.unknown {
-		background: #555;
-	}
-	button:hover {
-		filter: brightness(1.15);
-	}
-</style>
-</head>
-<body>
-<h1>Zigbee Switches</h1>
+type PageGroup struct {
+	Name    string
+	Devices []PageDevice
+}
 
-<div class="grid">
-{{range .}}
-	<div class="device">
-		<div class="name">{{.Description}}</div>
-		<div style="font-size:12px;color:#999;margin-bottom:12px">
-			{{.Name}}
-		</div>
-		<div class="state">{{.State}}</div>
-		<form method="POST" action="/toggle/{{.Escaped}}">
-			<button class="{{.Class}}" type="submit"
-				{{if not (or (eq .State "ON") (eq .State "OFF"))}}disabled{{end}}>
-				{{if eq .State "ON"}}Turn OFF
-				{{else if eq .State "OFF"}}Turn ON
-				{{else}}Unknown{{end}}
-			</button>
-		</form>
-	</div>
-{{else}}
-	<p>No Zigbee devices found.</p>
-{{end}}
-</div>
+type PageData struct {
+	Groups []PageGroup
+}
 
-<h1>Zigbee Lights</h1>
-<p>Coming soon ..</p>
-</body>
-</html>
-`))
+// Load and validate the configuration file.
+func loadConfig(filename string) error {
+	data, err := os.ReadFile(filename)
+	if err != nil {
+		return fmt.Errorf("reading config file: %w", err)
+	}
 
-// Return the devices to display, using the filter if one was supplied.
-func pageDevices() []PageDevice {
-	devices := client.Devices()
+	var config Config
 
-	list := make([]PageDevice, 0, len(devices))
+	if err := json.Unmarshal(data, &config); err != nil {
+		return fmt.Errorf("parsing config file: %w", err)
+	}
 
-	for _, d := range devices {
-		if filterRe != nil && !filterRe.MatchString(d.FriendlyName) {
-			continue
+	if len(config.Groups) == 0 {
+		return fmt.Errorf("configuration contains no groups")
+	}
+
+	groups = make([]DeviceGroup, 0, len(config.Groups))
+
+	for _, g := range config.Groups {
+		if strings.TrimSpace(g.Name) == "" {
+			return fmt.Errorf("group name cannot be empty")
 		}
 
-		state := client.GetState(d.FriendlyName)
-
-		class := "unknown"
-		switch state {
-		case "ON":
-			class = "on"
-		case "OFF":
-			class = "off"
+		if g.Pattern == "" {
+			return fmt.Errorf("pattern cannot be empty for group %q", g.Name)
 		}
 
-		list = append(list, PageDevice{
-			Name:        d.FriendlyName,
-			Description: d.Description,
-			State:       state,
-			Escaped:     url.PathEscape(d.FriendlyName),
-			Class:       class,
+		re, err := regexp.Compile(g.Pattern)
+		if err != nil {
+			return fmt.Errorf(
+				"invalid pattern %q for group %q: %w",
+				g.Pattern, g.Name, err,
+			)
+		}
+
+		groups = append(groups, DeviceGroup{
+			Name:    g.Name,
+			Pattern: re,
 		})
 	}
 
-	sort.Slice(list, func(i, j int) bool {
-		return list[i].Name < list[j].Name
-	})
-
-	return list
+	return nil
 }
 
+// Return true if a device matches at least one configured group.
+func allowedDevice(name string) bool {
+	for _, g := range groups {
+		if g.Pattern.MatchString(name) {
+			return true
+		}
+	}
+
+	return false
+}
+
+// Return the devices grouped according to the configuration.
+func pageGroups() PageData {
+	devices := client.Devices()
+
+	result := PageData{
+		Groups: make([]PageGroup, 0, len(groups)),
+	}
+
+	for _, g := range groups {
+		group := PageGroup{
+			Name:    g.Name,
+			Devices: make([]PageDevice, 0),
+		}
+
+		for _, d := range devices {
+			if !g.Pattern.MatchString(d.FriendlyName) {
+				continue
+			}
+
+			state := client.GetState(d.FriendlyName)
+
+			class := "unknown"
+
+			switch state {
+			case "ON":
+				class = "on"
+			case "OFF":
+				class = "off"
+			}
+
+			group.Devices = append(group.Devices, PageDevice{
+				Name:        d.FriendlyName,
+				Description: d.Description,
+				State:       state,
+				Escaped:     url.PathEscape(d.FriendlyName),
+				Class:       class,
+			})
+		}
+
+		sort.Slice(group.Devices, func(i, j int) bool {
+			return group.Devices[i].Name < group.Devices[j].Name
+		})
+
+		result.Groups = append(result.Groups, group)
+	}
+
+	return result
+}
+
+// HTTP handlers.
+
+// Server root shows all groups.
 func indexHandler(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path != "/" {
 		http.NotFound(w, r)
@@ -179,7 +192,7 @@ func indexHandler(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 
-	if err := pageTemplate.Execute(w, pageDevices()); err != nil {
+	if err := pageTemplate.Execute(w, pageGroups()); err != nil {
 		log.Printf("Template error: %v", err)
 	}
 }
@@ -225,8 +238,9 @@ func toggleHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Check that the requested device exists and is allowed by the filter.
+	// Check that the requested device exists and belongs to a configured group.
 	found := false
+
 	for _, d := range client.Devices() {
 		if d.FriendlyName == name {
 			found = true
@@ -234,7 +248,7 @@ func toggleHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if !found || (filterRe != nil && !filterRe.MatchString(name)) {
+	if !found || !allowedDevice(name) {
 		http.Error(w, "Unknown device", http.StatusNotFound)
 		return
 	}
@@ -248,47 +262,75 @@ func toggleHandler(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/", http.StatusSeeOther)
 }
 
+// Connect to MQTT, retrying a bunch of times if we see failure.
+func connectMQTT(config ziglib.Config) (*ziglib.Client, error) {
+	delay := 2 * time.Second
+	count := 1
+	max := 10
+	for count < max {
+		log.Printf("Connecting to MQTT broker attempt %d/%d...", count, max)
+
+		c, err := ziglib.Connect(config)
+		if err == nil {
+			return c, nil
+		}
+
+		log.Printf("MQTT connection failed: %v", err)
+		log.Printf("Retrying in %s...", delay)
+
+		time.Sleep(delay)
+
+		count++
+	}
+	return nil, fmt.Errorf("failed to connect to MQ after %d attempts", count)
+}
+
+// Main.
 func main() {
 	// Command-line flags.
-	filter := flag.String("filter", "", "Only display devices matching this regexp")
-	mq_host := flag.String("mq-host", "cube.my.flat", "The MQ host address")
-	mq_port := flag.Int("mq-port", 1883, "The MQ host port.")
-	mq_user := flag.String("mq-user", "", "The username to authenticate to the queue with")
-	mq_pass := flag.String("mq-pass", "", "The password to authenticate to the queue with")
-	http_port := flag.String("http-port", ":8000", "The port to listen upon")
+	configFile := flag.String("config", "devices.json", "Device group configuration file")
+	mqHost := flag.String("mq-host", "cube.my.flat", "The MQ host address")
+	mqPort := flag.Int("mq-port", 1883, "The MQ host port")
+	mqUser := flag.String("mq-user", "", "The username to authenticate to the queue with")
+	mqPass := flag.String("mq-pass", "", "The password to authenticate to the queue with")
+	httpPort := flag.String("http-port", ":8000", "The port to listen upon")
+
 	flag.Parse()
 
-	if *filter != "" {
-		var err error
-		filterRe, err = regexp.Compile(*filter)
-		if err != nil {
-			log.Fatalf("Failed to compile regexp %q: %v", *filter, err)
-		}
+	// Load device group configuration.
+	if err := loadConfig(*configFile); err != nil {
+		log.Fatalf("Configuration error: %v", err)
+	}
+
+	log.Printf("Loaded %d device groups from %s", len(groups), *configFile)
+
+	for _, g := range groups {
+		log.Printf("Group: %-20s Pattern: %s", g.Name, g.Pattern.String())
 	}
 
 	// Connect to MQTT through the shared client package.
+	mqUri := fmt.Sprintf("tcp://%s:%d/", *mqHost, *mqPort)
+
 	var err error
 
-	// Where we connect
-	mqUri := fmt.Sprintf("tcp://%s:%d/", *mq_host, *mq_port)
-
-	client, err = ziglib.Connect(ziglib.Config{
+	client, err = connectMQTT(ziglib.Config{
 		Broker:   mqUri,
 		ClientID: "zigbee-webserver",
-		Username: *mq_user,
-		Password: *mq_pass,
+		Username: *mqUser,
+		Password: *mqPass,
 	})
+
 	if err != nil {
 		log.Fatalf("MQTT connection failed: %v", err)
-		return
 	}
+
 	defer client.Close()
 
 	log.Printf("Connected to MQTT broker at %s", mqUri)
 
-	// Log discovered devices.
+	// Log discovered devices belonging to configured groups.
 	for _, d := range client.Devices() {
-		if filterRe != nil && !filterRe.MatchString(d.FriendlyName) {
+		if !allowedDevice(d.FriendlyName) {
 			continue
 		}
 
@@ -304,9 +346,9 @@ func main() {
 	http.HandleFunc("/", indexHandler)
 	http.HandleFunc("/toggle/{name}", toggleHandler)
 
-	log.Printf("HTTP server listening on %s", *http_port)
+	log.Printf("HTTP server listening on %s", *httpPort)
 
-	if err := http.ListenAndServe(*http_port, nil); err != nil {
+	if err := http.ListenAndServe(*httpPort, nil); err != nil {
 		log.Fatalf("HTTP server failed: %v", err)
 	}
 }

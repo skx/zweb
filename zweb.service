@@ -1,4 +1,3 @@
-
 [Unit]
 Description=Zigbee MQTT Web Control
 After=network-online.target
@@ -6,7 +5,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/zweb -filter=^socket-
+ExecStart=/usr/local/bin/zweb -config=/etc/zweb.json
 Restart=always
 RestartSec=5
 
