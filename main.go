@@ -173,6 +173,10 @@ func pageGroups() PageData {
 		result.Groups = append(result.Groups, group)
 	}
 
+	sort.Slice(result.Groups, func(i, j int) bool {
+		return result.Groups[i].Name < result.Groups[j].Name
+	})
+
 	return result
 }
 
