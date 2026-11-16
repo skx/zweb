@@ -1,0 +1,13 @@
+{
+  "groups": [
+    {
+      "name": "Switches",
+      "pattern": "^socket-"
+    },
+    {
+      "name": "Lights",
+      "pattern": "^lightbulb-"
+    }
+  ]
+}
+
