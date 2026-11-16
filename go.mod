@@ -1,12 +1,12 @@
 module github.com/skx/zweb
 
-go 1.27.1
+go 1.27.2
 
-require github.com/skx/ziglib v0.0.0-20261115154900-6cf358ab4ee1
+require github.com/skx/ziglib v0.0.1
 
 require (
 	github.com/eclipse/paho.mqtt.golang v1.5.1 // indirect
 	github.com/gorilla/websocket v1.5.3 // indirect
-	golang.org/x/net v0.44.0 // indirect
-	golang.org/x/sync v0.17.0 // indirect
+	golang.org/x/net v0.62.0 // indirect
+	golang.org/x/sync v0.25.0 // indirect
 )
