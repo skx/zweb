@@ -146,7 +146,7 @@ func pageGroups() PageData {
 				continue
 			}
 
-			state := client.GetState(d.FriendlyName)
+			state := d.State
 
 			class := "unknown"
 
@@ -263,7 +263,8 @@ func toggleHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	http.Redirect(w, r, "/", http.StatusSeeOther)
+	// Redirect to "/#name" so that the newly-changed ID gets focus.
+	http.Redirect(w, r, "/#"+name, http.StatusSeeOther)
 }
 
 // Connect to MQTT, retrying a bunch of times if we see failure.
